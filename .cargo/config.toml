@@ -1,0 +1,3 @@
+# ring's C/assembly is freestanding, so the host gcc can build it for musl.
+[env]
+CC_x86_64_unknown_linux_musl = "gcc"
