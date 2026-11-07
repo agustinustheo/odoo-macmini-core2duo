@@ -45,6 +45,9 @@ your server before anything is sent.
   (including pasted inline images) download to disk, so an agent can open them.
 - **Version-aware.** JSON-2 on Odoo 19+, JSON-RPC on older versions, and
   per-version handling for attachments, grouping and access checks.
+- **Multi-company aware.** `odoo-cli companies` shows which company a call
+  uses; `--company ID` picks one, like Odoo's company switcher. Timesheets
+  are not logged until the company is unambiguous.
 
 ## Install
 
