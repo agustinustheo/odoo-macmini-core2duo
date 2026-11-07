@@ -64,6 +64,7 @@ Any argument that takes JSON or text also accepts `-` (stdin) or `@file`.
 ```bash
 odoo-cli tasks --mine --open                   # my open tasks, most urgent first
 odoo-cli tasks --project 5 --open -s "invoice" # filter by project and name
+odoo-cli tasks --mine --stage Review            # what is waiting in Review
 odoo-cli tasks --mine --open --due-before 2026-11-14
 odoo-cli get project.task 42 -f name,description,stage_id,user_ids,date_deadline
 odoo-cli fields project.task -f stage_id,state  # what stages/states exist
@@ -74,9 +75,11 @@ odoo-cli update project.task 42 '{"date_deadline": "2026-11-20"}'
 odoo-cli create project.task '{"name": "Fix login", "project_id": 5, "user_ids": [[6,0,[7]]]}'
 ```
 
-Odoo 17+: done/cancelled is the `state` field (`1_done`, `1_canceled`); stages
-are separate. Check `fields project.task -f state` for the exact values.
-Older versions: closed means a folded stage.
+`--open` excludes Odoo's done/cancelled states (`1_done`, `1_canceled` on 17+)
+and every stage that is folded or named Done*, Cancel*, Closed* or Complete*.
+The output lists those stages in `excluded_stages`; if a board uses other
+names for finished work, filter with `--stage` or a `--domain` instead.
+`--stage Review` filters by stage name.
 
 ## Projects (project.project)
 

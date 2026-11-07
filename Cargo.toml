@@ -1,6 +1,6 @@
 [package]
 name = "odoo-cli"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Single-binary Odoo CLI for agents and humans, built for an old Core 2 Duo Mac mini"
 publish = false

@@ -266,9 +266,13 @@ struct TasksArgs {
     /// Only tasks assigned to me.
     #[arg(long)]
     mine: bool,
-    /// Only open tasks (not done, not cancelled, not in a folded stage).
+    /// Only open tasks: excludes Odoo's done/cancelled states and stages that
+    /// are folded or named Done*, Cancel*, Closed*, Complete* (listed in output).
     #[arg(long)]
     open: bool,
+    /// Stage name contains TEXT, e.g. --stage Review.
+    #[arg(long)]
+    stage: Option<String>,
     /// Only tasks of this project id.
     #[arg(long)]
     project: Option<i64>,
@@ -1046,11 +1050,28 @@ fn run(cli: Cli) -> Result<Value> {
                 let f = if s.has("user_ids") { "user_ids" } else { "user_id" };
                 domain.push(json!([f, "in", [c.profile.uid]]));
             }
+            let mut excluded_stages = Value::Null;
             if a.open {
                 if s.has("state") && s.selection_has("state", "1_done") {
                     domain.push(json!(["state", "not in", ["1_done", "1_canceled"]]));
                 }
-                domain.push(json!(["stage_id.fold", "=", false]));
+                // Boards often finish work in an unfolded "Done" stage, so
+                // folding alone is not enough. Report what was treated as closed.
+                let stages = c.call("project.task.type", "search_read", None, kw(vec![
+                    ("domain", json!(["|", "|", "|", "|",
+                        ["fold", "=", true], ["name", "=ilike", "done%"], ["name", "=ilike", "cancel%"],
+                        ["name", "=ilike", "closed%"], ["name", "=ilike", "complete%"]])),
+                    ("fields", json!(["name"])),
+                ]))?;
+                let rows: Vec<Value> = stages.as_array().cloned().unwrap_or_default();
+                let ids: Vec<i64> = rows.iter().filter_map(|r| r["id"].as_i64()).collect();
+                if !ids.is_empty() {
+                    domain.push(json!(["stage_id", "not in", ids]));
+                }
+                excluded_stages = json!(rows.iter().map(|r| json!([r["id"], r["name"]])).collect::<Vec<_>>());
+            }
+            if let Some(st) = &a.stage {
+                domain.push(json!(["stage_id.name", "ilike", st]));
             }
             if let Some(p) = a.project {
                 domain.push(json!(["project_id", "=", p]));
@@ -1073,7 +1094,11 @@ fn run(cli: Cli) -> Result<Value> {
                 .filter(|part| part.split_whitespace().next().is_some_and(|f| s.has(f) || f == "id"))
                 .collect::<Vec<_>>()
                 .join(",");
-            search_page(c, "project.task", domain, fields, a.limit, 0, (!order.is_empty()).then_some(order.as_str()))
+            let mut page = search_page(c, "project.task", domain, fields, a.limit, 0, (!order.is_empty()).then_some(order.as_str()))?;
+            if a.open {
+                page["excluded_stages"] = excluded_stages;
+            }
+            Ok(page)
         }
 
         Cmd::Timesheet(TimesheetCmd::Log { task, project, hours, description, date, employee, dry_run }) => {
