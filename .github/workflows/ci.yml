@@ -1,0 +1,31 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add x86_64-unknown-linux-musl
+      - name: Test
+        run: cargo test --locked
+      # Baseline x86-64 (no target-cpu flags) so it runs on the Core 2 Duo.
+      - name: Build static binary
+        run: cargo build --locked --release --target x86_64-unknown-linux-musl
+      - name: Check binary
+        run: |
+          B=target/x86_64-unknown-linux-musl/release/odoo-cli
+          file "$B" | grep -q 'static'
+          "$B" --version
+          "$B" guide | head -3
+      - name: Third-party notices are up to date
+        run: |
+          python3 scripts/third_party_notices.py
+          git diff --exit-code THIRD-PARTY-NOTICES.md

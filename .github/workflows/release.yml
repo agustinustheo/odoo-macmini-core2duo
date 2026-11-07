@@ -29,11 +29,17 @@ jobs:
           "$B" --version
           cp "$B" odoo-cli-x86_64-linux
           sha256sum odoo-cli-x86_64-linux > odoo-cli-x86_64-linux.sha256
+      # The binary bundles third-party crates; their licenses ship with it.
+      - name: License files
+        run: |
+          python3 scripts/third_party_notices.py
+          cp THIRD-PARTY-NOTICES.md LICENSE .
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" odoo-cli-x86_64-linux odoo-cli-x86_64-linux.sha256 \
-            --title "$GITHUB_REF_NAME" --notes "Static x86-64 Linux binary. See README for setup." \
-            || gh release upload "$GITHUB_REF_NAME" odoo-cli-x86_64-linux odoo-cli-x86_64-linux.sha256 --clobber
+          FILES="odoo-cli-x86_64-linux odoo-cli-x86_64-linux.sha256 LICENSE THIRD-PARTY-NOTICES.md"
+          gh release create "$GITHUB_REF_NAME" $FILES \
+            --title "$GITHUB_REF_NAME" --notes "Static x86-64 Linux binary (AGPL-3.0-only). See README for setup." \
+            || gh release upload "$GITHUB_REF_NAME" $FILES --clobber

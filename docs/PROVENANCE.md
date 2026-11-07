@@ -5,7 +5,9 @@ below was copied, translated or adapted. They were read to learn which
 features are useful and how Odoo behaves; the code here was written from
 Odoo's documented API and from observed server behaviour.
 
-Personal, private use. Review again before any distribution.
+This repository is licensed AGPL-3.0-only. Because none of the code below was
+incorporated, none of those projects' license terms attach to it; they are
+listed to document where ideas and behavioural knowledge came from.
 
 ## Projects consulted
 

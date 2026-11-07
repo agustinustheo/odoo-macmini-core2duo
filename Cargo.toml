@@ -3,6 +3,12 @@ name = "odoo-cli"
 version = "0.1.1"
 edition = "2021"
 description = "Single-binary Odoo CLI for agents and humans, built for an old Core 2 Duo Mac mini"
+license = "AGPL-3.0-only"
+authors = ["Agustinus Theodorus <agustinustheoo@gmail.com>"]
+repository = "https://github.com/agustinustheo/odoo-macmini-core2duo"
+readme = "README.md"
+keywords = ["odoo", "erp", "cli", "agents"]
+categories = ["command-line-utilities"]
 publish = false
 
 [[bin]]

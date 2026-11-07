@@ -47,10 +47,16 @@ Bump `version` in `Cargo.toml` first.
   fails, fix the config or ask the owner.
 - Tags so far are lightweight (`git -c tag.gpgsign=false tag vX.Y.Z` or
   `git update-ref`); signed annotated tags are fine too.
-- The repo is **private**. Do not make it public or distribute the binary
-  without reviewing `docs/PROVENANCE.md` (reference projects use ELv2,
-  MPL-2.0, BSD and AGPL licenses; no code from them is in this repo; keep it
-  that way: implement from Odoo's documented API and observed behaviour).
+- The repo is **public** and licensed **AGPL-3.0-only** (`LICENSE`, present
+  since the first commit). New code is AGPL-3.0-only too.
+- No code from the reference projects in `docs/PROVENANCE.md` (ELv2, MPL-2.0,
+  BSD, AGPL) is in this repo. Keep it that way: implement from Odoo's
+  documented API and observed behaviour.
+- New or updated dependencies must have AGPL-compatible licenses. After
+  changing `Cargo.lock`, run `python3 scripts/third_party_notices.py` and
+  commit `THIRD-PARTY-NOTICES.md` (CI fails if it is stale).
+- Never commit secrets, API keys, or the owner's business data (test output
+  from the owner's Odoo stays out of the repo).
 
 ## Testing against Odoo
 
