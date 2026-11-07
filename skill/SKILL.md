@@ -16,6 +16,10 @@ process, and is already configured for the user's Odoo.
    to run `odoo-cli setup --url URL --db DB --login LOGIN` themselves; never ask
    for the API key in chat.
 3. Check field names with `odoo-cli fields MODEL --search WORD` before writing.
+   The user has several companies: reads cover all of them, but writes go to
+   one. Pass `--company ID` (ids from `odoo-cli companies`) on writes and
+   timesheets for any company other than the default, and check `company_id`
+   in the output.
 4. Use `--dry-run` before writes, and confirm with the user before posting
    messages to followers, posting or resetting invoices, deleting, or changing
    users.

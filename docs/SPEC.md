@@ -62,6 +62,27 @@ a low-power machine (Intel Core 2 Duo P8600, 2 cores, no AES-NI, no SSE4.2,
   19 `formatted_read_group`, older legacy `read_group`).
 - R21. Introspection: `models`, `fields`, `modules`, `access`, `ref`.
 
+### Companies
+- R25. Without a company choice, Odoo 13+ applies its own default: reads and
+  record rules cover all of the user's allowed companies (`env.companies` =
+  `res.users.company_ids`); the current company (`env.company`: new records,
+  company-dependent fields) is the user's default company
+  (`res.users.company_id`). Confirmed in Odoo's `Environment.company` and
+  `.companies` (13.0 to 19.0) and live on 19 and 20.
+- R26. `--company ID[,ID...]` sets `allowed_company_ids` (first id = current
+  company). A different `allowed_company_ids` in `--context` is a usage error
+  (exit 2). Refused on Odoo 12 and older, which ignore the key.
+- R27. `companies` lists the allowed companies (id, name, country, currency,
+  parent) with `default_company`, `current_company` and
+  `selected_company_ids` for the call; `whoami` includes the same in short.
+  An id outside the allowed companies fails with exit 2 and the list.
+- R28. `timesheet log` reads back and prints `employee_id` and `company_id`;
+  it warns when no company or employee was chosen and the user has employees
+  in several companies; Odoo's "active employee in the selected companies"
+  error gets a hint with the user's employees per company.
+- R29. `fields` shows `company_dependent: true`. Dry runs show the merged
+  context. Odoo's multi-company errors get a `hint`.
+
 ### Performance
 - R22. No async runtime; one blocking HTTP agent per process; gzip responses.
 - R23. `fields_get` results cached on disk for 24 hours per profile and model.
@@ -79,5 +100,6 @@ a low-power machine (Intel Core 2 Duo P8600, 2 cores, no AES-NI, no SSE4.2,
 | HTML message bodies | escaped | `body_is_html` | `body_is_html` | `body_is_html` |
 | Discuss model | `mail.channel` (≤16), `discuss.channel` (17) | `discuss.channel` | `discuss.channel` | `discuss.channel` |
 | API key scopes | none | none | none | `rpc` / `mcp` |
+| Default company scope (no `allowed_company_ids`) | 13+: all allowed companies, current = default; ≤12: no such key, user's current company | same | same | same |
 
 The 19 and ≤17 columns follow the documented API; only Odoo 20 was tested live.

@@ -108,7 +108,16 @@ impl Client {
     /// Call `model.method`. `ids` is the recordset (`self`) for record methods;
     /// `kwargs` are named arguments. Both protocols take the same shape.
     pub fn call(&self, model: &str, method: &str, ids: Option<&[i64]>, kwargs: Map<String, Value>) -> Result<Value> {
-        let mut kwargs = kwargs;
+        let kwargs = self.with_context(kwargs);
+        match self.profile.protocol {
+            Protocol::Json2 => self.call_json2(model, method, ids, kwargs),
+            Protocol::JsonRpc => self.call_jsonrpc(model, method, ids, kwargs),
+        }
+    }
+
+    /// `kwargs` as they are sent: the global context (`--context`, `--company`)
+    /// merged into `kwargs.context`, where keys already set by the command win.
+    pub fn with_context(&self, mut kwargs: Map<String, Value>) -> Map<String, Value> {
         if let Some(ctx) = &self.context {
             let entry = kwargs.entry("context").or_insert_with(|| json!({}));
             if let Value::Object(c) = entry {
@@ -117,10 +126,7 @@ impl Client {
                 }
             }
         }
-        match self.profile.protocol {
-            Protocol::Json2 => self.call_json2(model, method, ids, kwargs),
-            Protocol::JsonRpc => self.call_jsonrpc(model, method, ids, kwargs),
-        }
+        kwargs
     }
 
     fn call_json2(&self, model: &str, method: &str, ids: Option<&[i64]>, mut kwargs: Map<String, Value>) -> Result<Value> {

@@ -69,6 +69,7 @@ Each release also has a `.sha256` checksum, the `LICENSE` and the
 ```bash
 odoo-cli setup --url https://yourcompany.odoo.com --db yourcompany --login you@example.com
 odoo-cli whoami
+odoo-cli companies      # several companies? pass --company ID on writes
 ```
 
 The key is stored in `~/.config/odoo-cli/<profile>.key` with mode `0600`.

@@ -30,6 +30,12 @@ struct Cli {
     /// Extra Odoo context as a JSON object, e.g. '{"lang":"en_US"}'.
     #[arg(long, global = true, value_name = "JSON")]
     context: Option<String>,
+    /// Work in these companies (Odoo 13+): reads see only their records (plus
+    /// shared ones); the first id gets new records and company-dependent
+    /// values. Default: all your companies, your default company first.
+    /// `odoo-cli companies` lists the ids.
+    #[arg(long, global = true, value_name = "ID[,ID...]")]
+    company: Option<String>,
     /// Request timeout in seconds.
     #[arg(long, global = true, default_value_t = 60)]
     timeout: u64,
@@ -44,8 +50,11 @@ struct Cli {
 enum Cmd {
     /// Save a connection profile. Reads the API key from stdin.
     Setup(SetupArgs),
-    /// Show the connected user, server version and protocol.
+    /// Show the connected user, server version, protocol and companies.
     Whoami,
+    /// Companies you can work in, which one is your default, and which ones
+    /// this call uses (see --company).
+    Companies,
     /// Print the agent guide: recipes for tasks, projects, finance, timesheets, messages, users.
     Guide,
     /// List installed models, optionally filtered by technical name or label.
@@ -473,8 +482,113 @@ fn as_ids(v: &Value) -> Vec<i64> {
     }
 }
 
-fn dry(model: &str, method: &str, ids: Option<&[i64]>, kwargs: &Map<String, Value>) -> Value {
-    json!({ "dry_run": true, "model": model, "method": method, "ids": ids, "kwargs": kwargs })
+/// What a write would send, with the global context (`--context`, `--company`)
+/// already merged into `kwargs.context`, exactly as `Client::call` sends it.
+fn dry(c: &Client, model: &str, method: &str, ids: Option<&[i64]>, kwargs: &Map<String, Value>) -> Value {
+    json!({ "dry_run": true, "model": model, "method": method, "ids": ids, "kwargs": c.with_context(kwargs.clone()) })
+}
+
+// ---------------------------------------------------------------- companies
+
+/// Apply `--company` to the global context as `allowed_company_ids` (first id
+/// = Odoo's current company). Giving both `--company` and a different
+/// `allowed_company_ids` in `--context` is an error rather than a silent pick.
+fn company_context(ctx: Option<Map<String, Value>>, company: Option<&str>) -> Result<Option<Map<String, Value>>> {
+    let Some(spec) = company else { return Ok(ctx) };
+    let bad = || Error::usage(format!("--company takes company ids like 3 or 3,1, got '{spec}'; list them with: odoo-cli companies"));
+    let mut ids: Vec<i64> = Vec::new();
+    for id in parse_ids(spec).map_err(|_| bad())? {
+        if id <= 0 {
+            return Err(bad());
+        }
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    let mut ctx = ctx.unwrap_or_default();
+    if let Some(given) = ctx.get("allowed_company_ids") {
+        if given != &json!(ids) {
+            return Err(Error::usage(format!(
+                "--company {spec} disagrees with allowed_company_ids {given} in --context; use one of them"
+            )));
+        }
+    }
+    ctx.insert("allowed_company_ids".into(), json!(ids));
+    Ok(Some(ctx))
+}
+
+/// Companies chosen for this call (`allowed_company_ids`), if any. An empty
+/// list means "not chosen" to Odoo, so it is None here too.
+fn chosen_companies(ctx: Option<&Map<String, Value>>) -> Option<Vec<i64>> {
+    let ids = as_ids(ctx?.get("allowed_company_ids")?);
+    (!ids.is_empty()).then_some(ids)
+}
+
+/// Context that makes Odoo fall back to all the user's companies: used to read
+/// the user and company list, so a bad `--company` is reported by us, clearly.
+fn all_companies_ctx() -> Value {
+    json!({ "allowed_company_ids": [] })
+}
+
+/// The connected user, read with every allowed company enabled.
+fn read_me(c: &Client, fields: &[&str]) -> Result<Value> {
+    let rows = c.call("res.users", "read", Some(&[c.profile.uid]), kw(vec![("fields", json!(fields)), ("context", all_companies_ctx())]))?;
+    rows.get(0).cloned().ok_or_else(|| Error::config(format!("user {} not found; rerun setup", c.profile.uid)))
+}
+
+/// Which companies this call works in. Mirrors Odoo 13+ (`Environment.company`
+/// and `.companies`): without `allowed_company_ids` reads cover all of the
+/// user's companies and the current company is the user's default company;
+/// otherwise the list given, first id current.
+fn company_info(c: &Client, user: &Value) -> Result<Value> {
+    let default = user["company_id"].get(0).and_then(Value::as_i64).unwrap_or(0);
+    let mut allowed = as_ids(&user["company_ids"]);
+    allowed.sort_unstable();
+    let rows = c.call("res.company", "read", Some(&allowed), kw(vec![
+        ("fields", json!(["name", "country_id", "currency_id", "parent_id"])),
+        ("context", all_companies_ctx()),
+    ]))?;
+    let rows = rows.as_array().cloned().unwrap_or_default();
+    let name = |id: i64| rows.iter().find(|r| r["id"].as_i64() == Some(id)).map_or(Value::Null, |r| r["name"].clone());
+    let chosen = chosen_companies(c.context.as_ref());
+    if let Some(ids) = &chosen {
+        let unknown: Vec<i64> = ids.iter().copied().filter(|i| !allowed.contains(i)).collect();
+        if !unknown.is_empty() {
+            return Err(Error::usage(format!("company id(s) {unknown:?} are not among your companies {allowed:?}")).with_detail(json!({
+                "companies": rows.iter().map(|r| json!([r["id"], r["name"]])).collect::<Vec<_>>(),
+            })));
+        }
+    }
+    let legacy = (1..=12).contains(&c.profile.major);
+    let current = chosen.as_ref().and_then(|ids| ids.first().copied()).unwrap_or(default);
+    let selected = if legacy { Value::Null } else { json!(chosen.unwrap_or_else(|| allowed.clone())) };
+    Ok(json!({
+        "current_company": [current, name(current)],
+        "default_company": [default, name(default)],
+        "selected_company_ids": selected,
+        "companies": rows,
+    }))
+}
+
+/// Point multi-company errors from Odoo at the flag that fixes them. Odoo's
+/// messages are translated; this matches the English ones and is best-effort.
+fn add_hint(mut e: Error) -> Error {
+    if !matches!(e.kind, error::Kind::Odoo) || e.detail.get("hint").is_some() {
+        return e;
+    }
+    let m = e.message.as_str();
+    let hint = if m.contains("unauthorized or invalid companies") {
+        "a company id in --company (or allowed_company_ids) is not one of yours; list yours with: odoo-cli companies"
+    } else if m.contains("multi-company issue") || m.contains("company inconsistencies") || m.contains("company crossover") {
+        "the records involved belong to different companies: pick the company with --company ID (ids: odoo-cli companies), add company_id to -f to see where records belong"
+    } else {
+        return e;
+    };
+    if !e.detail.is_object() {
+        e.detail = json!({});
+    }
+    e.detail["hint"] = json!(hint);
+    e
 }
 
 /// HTML to readable text for message bodies. Small on purpose.
@@ -683,7 +797,7 @@ fn post_message(client: &Client, model: &str, id: i64, body: String, note: bool,
         if !attach.is_empty() {
             k.insert("attachment_ids".into(), json!(attach));
         }
-        return Ok(dry(model, "message_post", Some(&[id]), &k));
+        return Ok(dry(client, model, "message_post", Some(&[id]), &k));
     }
     if !attach.is_empty() {
         let ids = attach.iter().map(|f| attachments::upload(client, f, "mail.compose.message", 0)).collect::<Result<Vec<i64>>>()?;
@@ -693,6 +807,29 @@ fn post_message(client: &Client, model: &str, id: i64, body: String, note: bool,
     // JSON-2 and jsonrpc both return the new mail.message id (or [id]).
     let msg_id = res.as_i64().or_else(|| as_ids(&res).first().copied());
     Ok(json!({ "ok": true, "model": model, "res_id": id, "message_id": msg_id, "note": note }))
+}
+
+/// My active employees in every company I can use: `[{id, name, company_id}]`.
+fn my_employees(c: &Client) -> Result<Vec<Value>> {
+    let rows = c.call("hr.employee", "search_read", None, kw(vec![
+        ("domain", json!([["user_id", "=", c.profile.uid]])),
+        ("fields", json!(["name", "company_id"])),
+        ("order", json!("company_id, id")),
+        ("context", all_companies_ctx()),
+    ]))?;
+    Ok(rows.as_array().cloned().unwrap_or_default())
+}
+
+/// "employee 7 in company 1 Acme, employee 9 in company 2 Acme Asia"
+fn describe_employees(rows: &[Value]) -> String {
+    let list: Vec<String> = rows
+        .iter()
+        .map(|e| {
+            let co = &e["company_id"];
+            format!("employee {} in company {} {}", e["id"], co.get(0).unwrap_or(&Value::Null), co.get(1).and_then(Value::as_str).unwrap_or(""))
+        })
+        .collect();
+    if list.is_empty() { "none".into() } else { list.join(", ") }
 }
 
 // ---------------------------------------------------------------- setup
@@ -797,6 +934,13 @@ fn run(cli: Cli) -> Result<Value> {
     if let Some(c) = &cli.context {
         client.context = Some(parse_object(c, "--context")?);
     }
+    if cli.company.is_some() && (1..=12).contains(&client.profile.major) {
+        return Err(Error::usage(format!(
+            "--company needs Odoo 13 or later (this server is {}); there the user's current company applies",
+            client.profile.version
+        )));
+    }
+    client.context = company_context(client.context.take(), cli.company.as_deref())?;
     let c = &client;
 
     match cmd {
@@ -804,12 +948,35 @@ fn run(cli: Cli) -> Result<Value> {
 
         Cmd::Whoami => {
             let p = &c.profile;
-            let user = c.call("res.users", "read", Some(&[p.uid]), kw(vec![("fields", json!(["name", "login", "company_id", "tz", "lang"]))]))?;
+            let user = read_me(c, &["name", "login", "company_id", "company_ids", "tz", "lang"])?;
+            // A bad --company still fails (exit 2); if Odoo refuses the company
+            // read (untested old versions), whoami itself keeps working.
+            let mut companies = match company_info(c, &user) {
+                Err(e) if matches!(e.kind, error::Kind::Odoo) => json!({ "error": e.message }),
+                other => other?,
+            };
+            // Compact here; `odoo-cli companies` has country, currency, parent.
+            if let Some(rows) = companies.get("companies").and_then(Value::as_array) {
+                let list: Vec<Value> = rows.iter().map(|r| json!([r["id"], r["name"]])).collect();
+                companies["companies"] = json!(list);
+            }
             Ok(json!({
                 "profile": p.name, "url": p.url, "db": p.db, "uid": p.uid, "partner_id": p.partner_id,
                 "server_version": p.version, "protocol": p.protocol.as_str(),
-                "user": user.get(0).cloned().unwrap_or(Value::Null),
+                "user": user, "companies": companies,
             }))
+        }
+
+        Cmd::Companies => {
+            let user = read_me(c, &["company_id", "company_ids"])?;
+            let mut out = company_info(c, &user)?;
+            out["note"] = json!(if (1..=12).contains(&c.profile.major) {
+                "Odoo 12 and older: the user's current company applies; --company is not supported"
+            } else {
+                "Reads see records of selected_company_ids plus shared ones (company_id false). New records \
+                 and company-dependent fields use current_company. Change both with --company ID[,ID...]."
+            });
+            Ok(out)
         }
 
         Cmd::Models { filter } => {
@@ -995,7 +1162,7 @@ fn run(cli: Cli) -> Result<Value> {
             s.warn_readonly(vals.iter().flat_map(|v| v.as_object().unwrap().keys().map(String::as_str)));
             let k = kw(vec![("vals_list", json!(vals))]);
             if dry_run {
-                return Ok(dry(&model, "create", None, &k));
+                return Ok(dry(c, &model, "create", None, &k));
             }
             let res = c.call(&model, "create", None, k)?;
             Ok(json!({ "ok": true, "model": model, "ids": as_ids(&res) }))
@@ -1012,7 +1179,7 @@ fn run(cli: Cli) -> Result<Value> {
             s.warn_readonly(vals.keys().map(String::as_str));
             let k = kw(vec![("vals", Value::Object(vals))]);
             if dry_run {
-                return Ok(dry(&model, "write", Some(&ids), &k));
+                return Ok(dry(c, &model, "write", Some(&ids), &k));
             }
             c.call(&model, "write", Some(&ids), k)?;
             Ok(json!({ "ok": true, "model": model, "ids": ids }))
@@ -1021,7 +1188,7 @@ fn run(cli: Cli) -> Result<Value> {
         Cmd::Delete { model, ids, yes, dry_run } => {
             let ids = parse_ids(&ids)?;
             if dry_run {
-                return Ok(dry(&model, "unlink", Some(&ids), &Map::new()));
+                return Ok(dry(c, &model, "unlink", Some(&ids), &Map::new()));
             }
             if !yes {
                 return Err(Error::usage(format!("refusing to delete {model} {ids:?} without --yes")));
@@ -1037,7 +1204,7 @@ fn run(cli: Cli) -> Result<Value> {
             };
             let ids = ids.as_deref().map(parse_ids).transpose()?;
             if dry_run {
-                return Ok(dry(&model, &method, ids.as_deref(), &k));
+                return Ok(dry(c, &model, &method, ids.as_deref(), &k));
             }
             let res = c.call(&model, &method, ids.as_deref(), k)?;
             Ok(json!({ "model": model, "method": method, "result": res }))
@@ -1124,12 +1291,67 @@ fn run(cli: Cli) -> Result<Value> {
                 vals.insert("employee_id".into(), json!(e));
             }
             Schema::load(c, "account.analytic.line", false)?.check(c, vals.keys().map(String::as_str))?;
+            // With no --employee, Odoo picks my employee in the task's or
+            // project's company, else in the current company. Say so when I have
+            // employees in several companies and none was chosen.
+            let mut warning = Value::Null;
+            if employee.is_none() && chosen_companies(c.context.as_ref()).is_none() {
+                // Advisory only: never block the log on this lookup.
+                let mine = my_employees(c).unwrap_or_default();
+                let mut companies: Vec<&Value> = mine.iter().map(|e| &e["company_id"]).collect();
+                companies.dedup();
+                if companies.len() > 1 {
+                    warning = json!(format!(
+                        "you have employees in several companies ({}); unless the task or project belongs to one \
+                         company, Odoo books this under your employee in your default company. Pass --company ID \
+                         or --employee ID to choose.",
+                        describe_employees(&mine)
+                    ));
+                }
+            }
             let k = kw(vec![("vals_list", json!([vals]))]);
             if dry_run {
-                return Ok(dry("account.analytic.line", "create", None, &k));
+                let mut out = dry(c, "account.analytic.line", "create", None, &k);
+                if !warning.is_null() {
+                    out["warning"] = warning;
+                }
+                return Ok(out);
             }
-            let res = c.call("account.analytic.line", "create", None, k)?;
-            Ok(json!({ "ok": true, "model": "account.analytic.line", "ids": as_ids(&res) }))
+            let res = c.call("account.analytic.line", "create", None, k).map_err(|e| {
+                if !e.message.contains("active employee in the selected companies") {
+                    return e;
+                }
+                // The line's company has no employee of mine among the selected companies.
+                let Ok(mine) = my_employees(c) else { return e };
+                let mut e = e;
+                if !e.detail.is_object() {
+                    e.detail = json!({});
+                }
+                e.detail["hint"] = json!(format!(
+                    "Odoo needs an active employee of yours in the timesheet's company: the task's or project's \
+                     company, or the first --company when they have none. Yours: {}. For a project without a \
+                     company, pass --company with one of those companies; for a project of another company, an \
+                     admin must create an employee for you there.",
+                    describe_employees(&mine)
+                ));
+                e.detail["my_employees"] = json!(mine);
+                e
+            })?;
+            let ids = as_ids(&res);
+            let mut out = json!({ "ok": true, "model": "account.analytic.line", "ids": ids });
+            // Read back who and which company Odoo chose. The line exists now,
+            // so a failed read is reported, not turned into an error.
+            match c.call("account.analytic.line", "read", Some(&ids), kw(vec![(
+                "fields",
+                json!(["date", "employee_id", "company_id", "project_id", "task_id", "unit_amount"]),
+            )])) {
+                Ok(rows) => out["records"] = rows,
+                Err(e) => out["readback_error"] = json!(e.message),
+            }
+            if !warning.is_null() {
+                out["warning"] = warning;
+            }
+            Ok(out)
         }
 
         Cmd::Timesheet(TimesheetCmd::List { mine, task, project, from, to, limit }) => {
@@ -1150,7 +1372,7 @@ fn run(cli: Cli) -> Result<Value> {
                 domain.push(json!(["date", "<=", t]));
             }
             let s = Schema::load(c, "account.analytic.line", false)?;
-            let fields = s.existing(&["id", "date", "employee_id", "project_id", "task_id", "name", "unit_amount"]);
+            let fields = s.existing(&["id", "date", "employee_id", "company_id", "project_id", "task_id", "name", "unit_amount"]);
             let mut page = search_page(c, "account.analytic.line", domain, fields, limit, 0, Some("date desc, id desc"))?;
             let total: f64 = page["records"].as_array().into_iter().flatten().filter_map(|r| r["unit_amount"].as_f64()).sum();
             page["hours_in_page"] = json!((total * 100.0).round() / 100.0);
@@ -1217,7 +1439,7 @@ fn main() {
     let cli = Cli::parse();
     let pretty = cli.pretty;
     let out = |v: &Value| if pretty { serde_json::to_string_pretty(v).unwrap() } else { v.to_string() };
-    match run(cli) {
+    match run(cli).map_err(add_hint) {
         Ok(v) => {
             let mut stdout = std::io::stdout().lock();
             let _ = writeln!(stdout, "{}", out(&v));
@@ -1250,6 +1472,53 @@ mod tests {
         assert_eq!(parse_ids("1, 2,3").unwrap(), vec![1, 2, 3]);
         assert!(parse_ids("").is_err());
         assert!(parse_ids("1,x").is_err());
+    }
+
+    fn ctx(s: &str) -> Option<Map<String, Value>> {
+        serde_json::from_str(s).ok()
+    }
+
+    #[test]
+    fn company_flag_sets_allowed_companies() {
+        let c = company_context(None, Some("3, 1,3")).unwrap().unwrap();
+        assert_eq!(c["allowed_company_ids"], json!([3, 1]), "order kept, duplicates dropped");
+        // Other --context keys survive.
+        let c = company_context(ctx(r#"{"lang":"fr_FR"}"#), Some("2")).unwrap().unwrap();
+        assert_eq!(c["lang"], json!("fr_FR"));
+        assert_eq!(c["allowed_company_ids"], json!([2]));
+        // No flag: context untouched.
+        assert_eq!(company_context(ctx(r#"{"a":1}"#), None).unwrap(), ctx(r#"{"a":1}"#));
+        assert_eq!(company_context(None, None).unwrap(), None);
+    }
+
+    #[test]
+    fn company_flag_conflicts_are_errors() {
+        // Same list in both places is fine; a different one is not.
+        assert!(company_context(ctx(r#"{"allowed_company_ids":[3,1]}"#), Some("3,1")).is_ok());
+        let e = company_context(ctx(r#"{"allowed_company_ids":[1]}"#), Some("3")).unwrap_err();
+        assert_eq!(e.exit_code(), 2);
+        for bad in ["", "x", "0", "-1", "1,a"] {
+            assert_eq!(company_context(None, Some(bad)).unwrap_err().exit_code(), 2, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn chosen_companies_ignores_empty_list() {
+        assert_eq!(chosen_companies(ctx(r#"{"allowed_company_ids":[2,1]}"#).as_ref()), Some(vec![2, 1]));
+        assert_eq!(chosen_companies(ctx(r#"{"allowed_company_ids":[]}"#).as_ref()), None);
+        assert_eq!(chosen_companies(ctx(r#"{"lang":"en_US"}"#).as_ref()), None);
+        assert_eq!(chosen_companies(None), None);
+    }
+
+    #[test]
+    fn multi_company_errors_get_a_hint() {
+        let e = add_hint(Error::odoo("Access to unauthorized or invalid companies.", json!({ "odoo_error": "x" })));
+        assert!(e.detail["hint"].as_str().unwrap().contains("odoo-cli companies"));
+        assert_eq!(e.detail["odoo_error"], json!("x"));
+        let e = add_hint(Error::odoo("... This seems to be a multi-company issue, you might ...", Value::Null));
+        assert!(e.detail["hint"].as_str().unwrap().contains("--company"));
+        let e = add_hint(Error::odoo("Missing required field", Value::Null));
+        assert!(e.detail.get("hint").is_none());
     }
 
     #[test]

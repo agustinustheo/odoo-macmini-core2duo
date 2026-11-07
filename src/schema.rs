@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 const TTL: Duration = Duration::from_secs(24 * 3600);
-const ATTRS: &[&str] = &["string", "type", "required", "readonly", "relation", "selection", "store", "help"];
+const ATTRS: &[&str] = &["string", "type", "required", "readonly", "relation", "selection", "store", "company_dependent", "help"];
 
 pub struct Schema {
     pub model: String,
@@ -36,8 +36,22 @@ fn fetch(client: &Client, model: &str) -> Result<Map<String, Value>> {
     if let Some(dir) = p.parent() {
         let _ = fs::create_dir_all(dir);
     }
-    let _ = fs::write(&p, serde_json::to_vec(&fields).unwrap());
+    // The attribute list is stored with the fields, so a cache written with
+    // other attributes (an older odoo-cli) is refetched instead of trusted.
+    let _ = fs::write(&p, serde_json::to_vec(&json!({ "attributes": ATTRS, "fields": fields })).unwrap());
     Ok(fields)
+}
+
+/// Fields from a cache file, or None if it was written with other attributes.
+fn cached_fields(v: Value) -> Option<Map<String, Value>> {
+    let Value::Object(mut m) = v else { return None };
+    if m.get("attributes") != Some(&json!(ATTRS)) {
+        return None;
+    }
+    match m.remove("fields") {
+        Some(Value::Object(f)) => Some(f),
+        _ => None,
+    }
 }
 
 impl Schema {
@@ -50,7 +64,7 @@ impl Schema {
                 .and_then(|t| SystemTime::now().duration_since(t).ok())
                 .is_some_and(|age| age < TTL);
             if young {
-                if let Ok(Value::Object(m)) = fs::read(&p).map(|b| serde_json::from_slice(&b).unwrap_or(Value::Null)) {
+                if let Some(m) = fs::read(&p).ok().and_then(|b| cached_fields(serde_json::from_slice(&b).unwrap_or(Value::Null))) {
                     return Ok(Schema { model: model.into(), fields: m, fresh: false });
                 }
             }
@@ -225,6 +239,15 @@ mod tests {
     fn existing_keeps_only_known_fields() {
         let s = schema(&["user_ids", "name"]);
         assert_eq!(s.existing(&["id", "name", "user_id", "user_ids"]), vec!["id", "name", "user_ids"]);
+    }
+
+    #[test]
+    fn cache_from_other_attributes_is_ignored() {
+        let fields = json!({ "name": { "string": "Name", "type": "char" } });
+        assert!(cached_fields(json!({ "attributes": ATTRS, "fields": fields })).is_some());
+        // Files written before attributes were stored: a bare field map.
+        assert!(cached_fields(fields.clone()).is_none());
+        assert!(cached_fields(json!({ "attributes": ["string", "type"], "fields": fields })).is_none());
     }
 
     #[test]

@@ -29,7 +29,8 @@ Errors are JSON on stderr: `{"error": {"kind", "message", ...}}`. Add
 ## Discover
 
 ```bash
-odoo-cli whoami                          # who am I, which server, which version
+odoo-cli whoami                          # who am I, which server, version, companies
+odoo-cli companies                       # company ids, names, currencies; which one is used
 odoo-cli modules project                 # is an app installed?
 odoo-cli models invoice                  # find model names by label or name
 odoo-cli fields project.task --search deadline
@@ -100,7 +101,11 @@ odoo-cli update account.analytic.line 563 '{"unit_amount": 2}'
 ```
 
 `timesheet log` fills the project from the task. The employee defaults to the
-one linked to the API key's user.
+one linked to the API key's user. The output shows the `employee_id` and
+`company_id` Odoo chose. If you have employees in several companies, the line
+goes to the task's or project's company, or to your **default** company when
+the project has none, and the output carries a `warning`. Choose with
+`--company ID` (see below).
 
 ## Finance (account.*)
 
@@ -178,8 +183,39 @@ odoo-cli update hr.employee 4 '{"job_title": "Lead Engineer"}'
 Creating or deactivating users changes who can log in (and can affect the
 subscription seat count). Confirm with the user first.
 
+## Multiple companies
+
+One database can hold several companies. `odoo-cli companies` lists yours;
+`whoami` shows the same in short.
+
+- **Reads span all your companies** by default: searches, counts and
+  aggregates mix records of every company you can use, plus shared records
+  (`company_id` false). Add `company_id` to `-f` when that matters. Names
+  repeat across companies (each company has its own "Sales" journal).
+- **`--company ID[,ID...]`** works like the company switcher in Odoo: reads
+  see only those companies (plus shared records), and the **first** id is the
+  current company. Example: `odoo-cli --company 3 search account.journal '[]'`.
+- **New records** without `company_id` go to the current company: the first
+  `--company` id, otherwise your *default* company (`default_company` in
+  `companies`). Pass `--company` on every write meant for another company.
+  Invoices follow their journal's company.
+- **Company-dependent fields** (`fields` marks them `"company_dependent": true`,
+  e.g. product cost `standard_price`, a partner's receivable account) hold one
+  value per company. Reads and writes use the current company only:
+  `odoo-cli --company 2 update product.product 7 '{"standard_price": 12}'`
+  changes company 2's cost and leaves the others alone.
+- **Money across companies**: `aggregate ... -a amount_total:sum` adds amounts
+  of every selected company together. Group by `company_id` (or pass
+  `--company`), and by `currency_id` when currencies differ.
+- **Cross-company errors** exit 1 with Odoo's message ("multi-company issue",
+  "company inconsistencies") and a `hint`. A record of another company reads
+  as "no access" until that company is selected.
+- `--dry-run` shows the company context that would be sent.
+- `--company` and `--context '{"allowed_company_ids":[...]}'` do the same
+  thing; giving both with different ids fails with exit 2. Not available on
+  Odoo 12 and older.
+
 ## Options for every command
 
-`--profile NAME` (or `ODOO_PROFILE`) · `--pretty` · `--context '{"lang":"fr_FR"}'`
-· `--timeout SECONDS` · `--debug`. For multi-company data:
-`--context '{"allowed_company_ids":[1,2]}'`.
+`--profile NAME` (or `ODOO_PROFILE`) · `--company ID[,ID...]` · `--pretty` ·
+`--context '{"lang":"fr_FR"}'` · `--timeout SECONDS` · `--debug`.
