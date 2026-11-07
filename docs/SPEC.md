@@ -76,10 +76,13 @@ a low-power machine (Intel Core 2 Duo P8600, 2 cores, no AES-NI, no SSE4.2,
   parent) with `default_company`, `current_company` and
   `selected_company_ids` for the call; `whoami` includes the same in short.
   An id outside the allowed companies fails with exit 2 and the list.
-- R28. `timesheet log` reads back and prints `employee_id` and `company_id`;
-  it warns when no company or employee was chosen and the user has employees
-  in several companies; Odoo's "active employee in the selected companies"
-  error gets a hint with the user's employees per company.
+- R28. `timesheet log` reads back and prints `employee_id` and `company_id`.
+  When no `--company`/`--employee` is given, the user has employees in
+  several companies and neither the task nor the project has a company, it
+  refuses with exit 2 before sending (Odoo would silently use the default
+  company's employee); the error lists `choices` per company with the
+  project's existing timesheet count. Odoo's "active employee in the selected
+  companies" error gets a hint with the user's employees per company.
 - R29. `fields` shows `company_dependent: true`. Dry runs show the merged
   context. Odoo's multi-company errors get a `hint`.
 

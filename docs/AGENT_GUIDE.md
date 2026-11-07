@@ -102,10 +102,12 @@ odoo-cli update account.analytic.line 563 '{"unit_amount": 2}'
 
 `timesheet log` fills the project from the task. The employee defaults to the
 one linked to the API key's user. The output shows the `employee_id` and
-`company_id` Odoo chose. If you have employees in several companies, the line
-goes to the task's or project's company, or to your **default** company when
-the project has none, and the output carries a `warning`. Choose with
-`--company ID` (see below).
+`company_id` Odoo chose. If you have employees in several companies and the
+task and project have no company, `timesheet log` refuses (exit 2, nothing
+sent) instead of letting Odoo pick your default company. The error lists
+`choices`, one per company, with how many timesheets the project already has
+there; rerun with `--company ID` (usually the company with the most) or
+`--employee ID`. Ask the user if the counts do not make it obvious.
 
 ## Finance (account.*)
 

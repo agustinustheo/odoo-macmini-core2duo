@@ -89,7 +89,7 @@ Bump `version` in `Cargo.toml` first.
 | `companies`, `whoami` companies block, bad/conflicting `--company` → exit 2 | yes | yes |
 | company-dependent fields read per current company | yes (partner receivable account) | yes, read + write (`standard_price`) |
 | new records go to first `--company` id, else default company; invoices follow journal | not tested (real data) | yes |
-| `timesheet log` employee/company readback, ambiguity warning, no-employee hint | dry-run only | yes |
+| `timesheet log` employee/company readback, exit 2 on ambiguous company (with `choices`), no-employee hint | dry-run only | yes |
 | Odoo 18 and older (JSON-RPC path) | untested | untested |
 
 ## Known gaps / ideas
@@ -102,9 +102,9 @@ Bump `version` in `Cargo.toml` first.
 - The `--open` heuristic matches stage names Done*/Cancel*/Closed*/Complete*;
   it reports what it excluded in `excluded_stages`.
 - Multi-company: a user with employees in several companies, logging on a
-  project without a company and without `--company`, gets the employee of
-  their default company. The owner's setup is like that; check the
-  owner's instance read-only before relying on which company is "usual".
+  project without a company, would get the employee of their default
+  company from Odoo, so `timesheet log` refuses until `--company` or
+  `--employee` is given. The owner's setup is like that.
 - `attachment upload` and `chatter post --attach` create the file in the
   current company, not the record's company (harmless: access follows the
   record). Files attached via `chatter post --attach` stay linked to the

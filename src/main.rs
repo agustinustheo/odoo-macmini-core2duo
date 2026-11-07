@@ -832,6 +832,62 @@ fn describe_employees(rows: &[Value]) -> String {
     if list.is_empty() { "none".into() } else { list.join(", ") }
 }
 
+/// Whether a timesheet's task or project belongs to a company; Odoo then books
+/// the line in that company whatever the current company is.
+fn belongs_to_company(c: &Client, task: Option<i64>, project: i64) -> Result<bool> {
+    let has = |model: &str, id: i64| -> Result<bool> {
+        let rows = c.call(model, "read", Some(&[id]), kw(vec![("fields", json!(["company_id"]))]))?;
+        Ok(rows.get(0).is_some_and(|r| r["company_id"].get(0).is_some()))
+    };
+    if let Some(t) = task {
+        if has("project.task", t)? {
+            return Ok(true);
+        }
+    }
+    has("project.project", project)
+}
+
+/// Exit-2 error for a timesheet whose company Odoo would have to guess. Lists
+/// one choice per company I have an employee in, with how many timesheets the
+/// project already has there, so the caller can pick the usual one.
+fn ambiguous_timesheet(c: &Client, task: Option<i64>, project: i64, mine: &[Value]) -> Error {
+    let domain = vec![json!(["project_id", "=", project])];
+    let per_company: Vec<(i64, i64)> = read_groups(c, "account.analytic.line", domain, &["company_id".into()], &["__count".into()], 0, None)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|g| {
+            let co = &g["company_id"]; // bare id on 20, [id, name] before
+            Some((co.as_i64().or_else(|| co.get(0).and_then(Value::as_i64))?, g["__count"].as_i64().unwrap_or(0)))
+        })
+        .collect();
+    let count_in = |co: i64| per_company.iter().find(|(id, _)| *id == co).map_or(0, |(_, n)| *n);
+    let choices: Vec<Value> = mine
+        .iter()
+        .map(|e| {
+            let co = e["company_id"].get(0).and_then(Value::as_i64).unwrap_or(0);
+            json!({
+                "company_id": e["company_id"], "employee_id": [e["id"], e["name"]],
+                "project_timesheets_in_company": count_in(co), "use": format!("--company {co}"),
+            })
+        })
+        .collect();
+    let what = match task {
+        Some(t) => format!("task {t} and project {project} have"),
+        None => format!("project {project} has"),
+    };
+    let usual = per_company.iter().filter(|(_, n)| *n > 0).max_by_key(|(_, n)| *n);
+    let usual = match usual {
+        Some((co, n)) => format!(" This project's existing timesheets are mostly in company {co} ({n})."),
+        None => String::new(),
+    };
+    Error::usage(format!(
+        "not sent: {what} no company and you have employees in several companies ({}), so Odoo would \
+         pick one for you (your default company's). Choose with --company ID or --employee ID.{usual}",
+        describe_employees(mine)
+    ))
+    .with_detail(json!({ "choices": choices }))
+}
+
 // ---------------------------------------------------------------- setup
 
 fn setup(a: SetupArgs) -> Result<Value> {
@@ -1291,31 +1347,26 @@ fn run(cli: Cli) -> Result<Value> {
                 vals.insert("employee_id".into(), json!(e));
             }
             Schema::load(c, "account.analytic.line", false)?.check(c, vals.keys().map(String::as_str))?;
-            // With no --employee, Odoo picks my employee in the task's or
-            // project's company, else in the current company. Say so when I have
-            // employees in several companies and none was chosen.
-            let mut warning = Value::Null;
-            if employee.is_none() && chosen_companies(c.context.as_ref()).is_none() {
-                // Advisory only: never block the log on this lookup.
+            // With no --employee, Odoo books the line under my employee in the
+            // task's or project's company, else in the *current* company: my
+            // default company when nothing is chosen. With employees in several
+            // companies and a task/project without a company, that guess
+            // silently picks a company. Refuse (exit 2, nothing sent) instead.
+            let legacy = (1..=12).contains(&c.profile.major);
+            if employee.is_none() && chosen_companies(c.context.as_ref()).is_none() && !legacy {
+                // If this lookup fails (no HR read rights), Odoo decides as
+                // before; the readback below still shows what it chose.
                 let mine = my_employees(c).unwrap_or_default();
-                let mut companies: Vec<&Value> = mine.iter().map(|e| &e["company_id"]).collect();
+                let mut companies: Vec<i64> = mine.iter().filter_map(|e| e["company_id"].get(0).and_then(Value::as_i64)).collect();
+                companies.sort_unstable();
                 companies.dedup();
-                if companies.len() > 1 {
-                    warning = json!(format!(
-                        "you have employees in several companies ({}); unless the task or project belongs to one \
-                         company, Odoo books this under your employee in your default company. Pass --company ID \
-                         or --employee ID to choose.",
-                        describe_employees(&mine)
-                    ));
+                if companies.len() > 1 && !belongs_to_company(c, task, project)? {
+                    return Err(ambiguous_timesheet(c, task, project, &mine));
                 }
             }
             let k = kw(vec![("vals_list", json!([vals]))]);
             if dry_run {
-                let mut out = dry(c, "account.analytic.line", "create", None, &k);
-                if !warning.is_null() {
-                    out["warning"] = warning;
-                }
-                return Ok(out);
+                return Ok(dry(c, "account.analytic.line", "create", None, &k));
             }
             let res = c.call("account.analytic.line", "create", None, k).map_err(|e| {
                 if !e.message.contains("active employee in the selected companies") {
@@ -1347,9 +1398,6 @@ fn run(cli: Cli) -> Result<Value> {
             )])) {
                 Ok(rows) => out["records"] = rows,
                 Err(e) => out["readback_error"] = json!(e.message),
-            }
-            if !warning.is_null() {
-                out["warning"] = warning;
             }
             Ok(out)
         }
