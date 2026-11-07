@@ -30,10 +30,12 @@ jobs:
           cp "$B" odoo-cli-x86_64-linux
           sha256sum odoo-cli-x86_64-linux > odoo-cli-x86_64-linux.sha256
       # The binary bundles third-party crates; their licenses ship with it.
+      # Both files are published from the repository root as they are.
       - name: License files
         run: |
           python3 scripts/third_party_notices.py
-          cp THIRD-PARTY-NOTICES.md LICENSE .
+          git diff --exit-code THIRD-PARTY-NOTICES.md
+          test -s LICENSE
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
         env:
